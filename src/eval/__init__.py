@@ -2,8 +2,6 @@ from .ref_iqa import calculate_psnr, calculate_lpips, calculate_ssim
 from .fid import calculate_rfid, calculate_gfid
 import numpy as np
 import torch
-import numpy as np
-import torch
 import torch.distributed as dist
 from PIL import Image
 from torch.cuda.amp import autocast
@@ -292,7 +290,7 @@ def evaluate_reconstruction_distributed(
                 reconstructions.append(img)
 
     reconstructions = np.stack(reconstructions)
-    shard_path = os.path.join(temp_dir, f"recon_{global_step:07d}_{rank:02d}.npz")
+    shard_path = os.path.join(temp_dir, f"recon_{rank:02d}.npz")  # 固定名，replace 模式
     np.savez(shard_path, arr_0=reconstructions)
 
     if rank == 0:
@@ -307,7 +305,7 @@ def evaluate_reconstruction_distributed(
         # Combine all reconstruction shards
         all_recons = []
         for r in range(world_size):
-            shard_file = os.path.join(temp_dir, f"recon_{global_step:07d}_{r:02d}.npz")
+            shard_file = os.path.join(temp_dir, f"recon_{r:02d}.npz")
             shard_data = np.load(shard_file)["arr_0"]
             all_recons.append(shard_data)
 
@@ -323,6 +321,9 @@ def evaluate_reconstruction_distributed(
         ref_images = np.load(ref_npz_path)["arr_0"]
         print(f"[Eval] Loaded reference NPZ from {ref_npz_path}, shape: {ref_images.shape}")
 
+        # Save 10 comparison images (fixed filename, replace each eval)
+        _save_eval_comparison(ref_images, combined_recons, experiment_dir, global_step, n=10)
+
         # Compute metrics
         print("[Eval] Computing metrics...")
         metrics = compute_reconstruction_metrics(
@@ -331,7 +332,7 @@ def evaluate_reconstruction_distributed(
             device,
             metric_batch_size,
             metrics_to_compute=metrics_to_compute,
-            disable_bar= True, # by default no bar
+            disable_bar=True,
         )
 
         # Print results
@@ -339,9 +340,9 @@ def evaluate_reconstruction_distributed(
         for key, value in metrics.items():
             print(f"  {key}: {value:.6f}")
 
-        # Cleanup reconstruction shards
+        # Cleanup reconstruction shards (replace 模式，用完即删)
         for r in range(world_size):
-            shard_file = os.path.join(temp_dir, f"recon_{global_step:07d}_{r:02d}.npz")
+            shard_file = os.path.join(temp_dir, f"recon_{r:02d}.npz")
             if os.path.exists(shard_file):
                 os.remove(shard_file)
 
@@ -349,6 +350,51 @@ def evaluate_reconstruction_distributed(
     # model.train()
 
     return metrics
+
+
+def _save_eval_comparison(
+    ref_images: np.ndarray,
+    recon_images: np.ndarray,
+    experiment_dir: str,
+    global_step: int,
+    n: int = 10,
+) -> None:
+    """
+    保存 n 张参考图 vs 重建图的对比拼图。
+    固定文件名 eval_latest.png，每次 eval 覆盖，不积累磁盘。
+    同时保留一份带 step 编号的快照 eval_step_{step:07d}.png，
+    但先删除上一次的快照（保持只有最新一张）。
+    """
+    img_dir = os.path.join(experiment_dir, "eval_images")
+    os.makedirs(img_dir, exist_ok=True)
+
+    k = min(n, len(ref_images), len(recon_images))
+    # 上下拼：第一行参考图，第二行重建图
+    rows = []
+    for i in range(k):
+        rows.append(Image.fromarray(ref_images[i]))   # uint8 HWC
+    for i in range(k):
+        rows.append(Image.fromarray(recon_images[i]))
+
+    w, h = rows[0].size
+    grid = Image.new("RGB", (w * k, h * 2))
+    for idx, img in enumerate(rows):
+        col = idx % k
+        row = idx // k
+        grid.paste(img, (col * w, row * h))
+
+    # 固定名（replace）
+    latest_path = os.path.join(img_dir, "eval_latest.png")
+    grid.save(latest_path)
+
+    # 带 step 的快照：先删旧的，再写新的（只保留最新一张）
+    for old in os.listdir(img_dir):
+        if old.startswith("eval_step_") and old.endswith(".png"):
+            os.remove(os.path.join(img_dir, old))
+    grid.save(os.path.join(img_dir, f"eval_step_{global_step:07d}.png"))
+    print(f"[Eval] Saved {k}-image comparison to {img_dir}/")
+
+
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser()

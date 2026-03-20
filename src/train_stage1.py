@@ -15,6 +15,7 @@ import logging
 import math
 import time
 import os
+from datetime import datetime
 from collections import defaultdict
 from copy import deepcopy
 from pathlib import Path
@@ -226,7 +227,7 @@ def main():
     csv_file = open(csv_path, "a", newline="") if rank == 0 else None
     csv_writer = csv.writer(csv_file) if csv_file else None
     if csv_file and os.path.getsize(csv_path) == 0:
-        csv_writer.writerow(["step", "epoch", "split", "key", "value"])
+        csv_writer.writerow(["step", "epoch", "timestamp", "split", "key", "value"])
 
     # --test-run: force eval every step so it is exercised
     if args.max_steps is not None and do_eval:
@@ -530,8 +531,9 @@ def main():
                 if args.wandb:
                     wandb_utils.log(stats, step=global_step)
                 if csv_writer:
+                    ts = datetime.now().strftime("%H:%M:%S")
                     for k, v in stats.items():
-                        csv_writer.writerow([global_step, epoch, "train", k, f"{v:.6f}"])
+                        csv_writer.writerow([global_step, epoch, ts, "train", k, f"{v:.6f}"])
                     csv_file.flush()
                 logger.info("Generating EMA samples...")
                 with torch.no_grad():
@@ -571,8 +573,9 @@ def main():
                     if args.wandb:
                         wandb_utils.log(eval_stats, step=global_step)
                     if csv_writer and eval_stats:
+                        ts = datetime.now().strftime("%H:%M:%S")
                         for k, v in eval_stats.items():
-                            csv_writer.writerow([global_step, epoch, "eval", k, f"{v:.6f}"])
+                            csv_writer.writerow([global_step, epoch, ts, "eval", k, f"{v:.6f}"])
                         csv_file.flush()
                 logger.info("Evaluation done.")
             global_step += 1

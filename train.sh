@@ -21,9 +21,9 @@ set -e
 RAE_ROOT="$(cd "$(dirname "$0")" && pwd)"
 DATA_DIR="/root/paddlejob/workspace/env_run/penghaotian/datas/imagenet-1k"
 ENV_ACTIVATE="/root/paddlejob/workspace/env_run/penghaotian/envs/rae/bin/activate"
-CONFIG="configs/stage1/training/CRadiov4-SO400M_decXL_bs64.yaml"
-RESULTS_DIR="ckpts/CRadiov4-SO400M_decXL_bs64"
-export EXPERIMENT_NAME="${EXPERIMENT_NAME:-CRadiov4-SO400M_decXL_bs64}"
+CONFIG="configs/stage1/training/CRadiov4-SO400M_decXL_bs128.yaml"
+RESULTS_DIR="ckpts/CRadiov4-SO400M_decXL_bs128"
+export EXPERIMENT_NAME="${EXPERIMENT_NAME:-CRadiov4-SO400M_decXL_bs128}"
 
 # ─── 颜色 / 日志 ───────────────────────────────────────────────────────────────
 GREEN='\033[0;32m'; YELLOW='\033[1;33m'; CYAN='\033[0;36m'; RED='\033[0;31m'; NC='\033[0m'
