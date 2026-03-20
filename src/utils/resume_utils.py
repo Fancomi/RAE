@@ -40,7 +40,8 @@ def find_resume_checkpoint(resume_dir) -> Optional[str]:
     checkpoints = [
         os.path.join(checkpoint_dir, f)
         for f in os.listdir(checkpoint_dir)
-        if f.endswith(".pt") or f.endswith(".ckpt") or f.endswith(".safetensor")
+        if (f.endswith(".pt") or f.endswith(".ckpt") or f.endswith(".safetensor"))
+        and f != "ep-last.pt"
     ]
     if len(checkpoints) == 0:
         return None

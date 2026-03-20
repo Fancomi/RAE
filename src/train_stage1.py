@@ -10,8 +10,10 @@ targeting the RAE autoencoder architecture used in this repository.
 from __future__ import annotations
 
 import argparse
+import csv
 import logging
 import math
+import time
 import os
 from collections import defaultdict
 from copy import deepcopy
@@ -63,6 +65,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument('--wandb', action='store_true', help='Use Weights & Biases for logging if set.')
     parser.add_argument("--compile", action="store_true", help="Use torch compile (for rae.encode, rae.forward).")
     parser.add_argument("--max-steps", type=int, default=None, help="Stop after this many steps (for quick smoke tests).")
+    parser.add_argument("--no-resume", action="store_true", help="Ignore existing checkpoints and start fresh.")
     return parser.parse_args()
 
 
@@ -134,7 +137,7 @@ def load_checkpoint(
     disc_scheduler: Optional[LambdaLR],
 ) -> Tuple[int, int]:
     checkpoint = torch.load(path, map_location="cpu")
-    model.module.load_state_dict(checkpoint["model"])
+    (model.module if isinstance(model, DDP) else model).load_state_dict(checkpoint["model"])
     ema_model.load_state_dict(checkpoint["ema"])
     optimizer.load_state_dict(checkpoint["optimizer"])
     if scheduler is not None and checkpoint.get("scheduler") is not None:
@@ -217,6 +220,17 @@ def main():
     full_cfg.cmd_args = vars(args)
     full_cfg.experiment_dir = experiment_dir
     full_cfg.checkpoint_dir = checkpoint_dir
+
+    # CSV metrics logger (train + eval curves, rank-0 only)
+    csv_path = os.path.join(experiment_dir, "metrics.csv")
+    csv_file = open(csv_path, "a", newline="") if rank == 0 else None
+    csv_writer = csv.writer(csv_file) if csv_file else None
+    if csv_file and os.path.getsize(csv_path) == 0:
+        csv_writer.writerow(["step", "epoch", "split", "key", "value"])
+
+    # --test-run: force eval every step so it is exercised
+    if args.max_steps is not None and do_eval:
+        eval_interval = 1
     
     
     #### Model init
@@ -299,7 +313,7 @@ def main():
     start_epoch = 0
     global_step = 0
     maybe_resume_ckpt_path = find_resume_checkpoint(experiment_dir)
-    if maybe_resume_ckpt_path is not None:
+    if maybe_resume_ckpt_path is not None and not args.no_resume:
         logger.info(f"Experiment resume checkpoint found at {maybe_resume_ckpt_path}, automatically resuming...")
         ckpt_path = Path(maybe_resume_ckpt_path)
         if ckpt_path.is_file():
@@ -354,6 +368,8 @@ def main():
     gan_start_step = gan_start_epoch * steps_per_epoch
     disc_update_step = disc_update_epoch * steps_per_epoch
     lpips_start_step = lpips_start_epoch * steps_per_epoch
+    total_steps = (num_epochs - start_epoch) * steps_per_epoch
+    step_times: list = []   # rolling buffer for ETA estimation
     if dist.is_initialized():
         dist.barrier()
     for epoch in range(start_epoch, num_epochs):
@@ -377,6 +393,7 @@ def main():
                 disc_scheduler,
             )
         for step, (images, _) in enumerate(loader):
+            _step_start = time.time()
             use_gan = global_step >= gan_start_step and disc_weight > 0.0
             train_disc = global_step >= disc_update_step and disc_weight > 0.0
             use_lpips = global_step >= lpips_start_step and perceptual_weight > 0.0
@@ -475,7 +492,16 @@ def main():
             epoch_metrics["total"] += total_loss.detach()
             num_batches += 1
 
+            step_times.append(time.time() - _step_start)
+            if len(step_times) > 200:
+                step_times.pop(0)
+
             if log_interval > 0 and global_step % log_interval == 0 and rank == 0:
+                avg_step_time = sum(step_times) / len(step_times)
+                steps_done = global_step - start_epoch * steps_per_epoch
+                steps_left = total_steps - steps_done
+                eta_sec = int(avg_step_time * steps_left)
+                eta_str = f"{eta_sec//3600}h{(eta_sec%3600)//60:02d}m"
                 stats = {
                     "loss/total": total_loss.detach().item(),
                     "loss/recon": rec_loss.detach().item(),
@@ -495,12 +521,18 @@ def main():
                         }
                     )
                 logger.info(
-                    f"[Epoch {epoch} | Step {global_step}] "
-                    + ", ".join(f"{k}: {v:.4f}" for k, v in stats.items())
+                    f"[Epoch {epoch} | Step {global_step} | {avg_step_time:.1f}s/step | ETA {eta_str}] "
+                    + ", ".join(
+                        f"{k}: {v:.2e}" if k.startswith("lr/") else f"{k}: {v:.4f}"
+                        for k, v in stats.items()
+                    )
                 )
                 if args.wandb:
                     wandb_utils.log(stats, step=global_step)
-            if global_step % sample_every == 0:
+                if csv_writer:
+                    for k, v in stats.items():
+                        csv_writer.writerow([global_step, epoch, "train", k, f"{v:.6f}"])
+                    csv_file.flush()
                 logger.info("Generating EMA samples...")
                 with torch.no_grad():
                     # only keep first 4 sample
@@ -538,6 +570,10 @@ def main():
                     eval_stats = {f"eval_{mod_name}/{k}": v for k, v in eval_stats.items()} if eval_stats is not None else {}
                     if args.wandb:
                         wandb_utils.log(eval_stats, step=global_step)
+                    if csv_writer and eval_stats:
+                        for k, v in eval_stats.items():
+                            csv_writer.writerow([global_step, epoch, "eval", k, f"{v:.6f}"])
+                        csv_file.flush()
                 logger.info("Evaluation done.")
             global_step += 1
             if args.max_steps is not None and global_step >= args.max_steps:
@@ -589,6 +625,8 @@ def main():
         )
     if dist.is_initialized():
         dist.barrier()
+    if csv_file:
+        csv_file.close()
     logger.info("Done!")
     cleanup_distributed()
 
