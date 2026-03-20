@@ -84,7 +84,8 @@ def prepare_dataloader(
     world_size: int,
     transform: List= None,
 ) -> Tuple[DataLoader, DistributedSampler]:
-    dataset = ImageFolder(str(data_path), transform=transform)
+    train_dir = Path(data_path) / "train"
+    dataset = ImageFolder(str(train_dir if train_dir.is_dir() else data_path), transform=transform)
     sampler = DistributedSampler(dataset, num_replicas=world_size, rank=rank, shuffle=True)
     loader = DataLoader(
         dataset,

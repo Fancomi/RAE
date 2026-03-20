@@ -35,10 +35,13 @@ class RAE(nn.Module):
         encoder_cls = ARCHS[encoder_cls]
         self.encoder: Stage1Protocal = encoder_cls(**encoder_params)
         print(f"encoder_config_path: {encoder_config_path}")
-        proc = AutoImageProcessor.from_pretrained(encoder_config_path)
+        proc = AutoImageProcessor.from_pretrained(encoder_config_path, trust_remote_code=True)
         self.encoder_mean = torch.tensor(proc.image_mean).view(1, 3, 1, 1)
         self.encoder_std = torch.tensor(proc.image_std).view(1, 3, 1, 1)
-        encoder_config = AutoConfig.from_pretrained(encoder_config_path)
+        try:
+            encoder_config = AutoConfig.from_pretrained(encoder_config_path, trust_remote_code=True)
+        except Exception:
+            encoder_config = None
         # see if the encoder has patch size attribute            
         self.encoder_input_size = encoder_input_size
         self.encoder_patch_size = self.encoder.patch_size

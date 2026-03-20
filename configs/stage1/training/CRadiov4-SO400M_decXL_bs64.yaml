@@ -1,0 +1,95 @@
+# Stage 1 training config: C-RADIOv4-SO400M encoder + ViT-XL decoder
+#
+# Encoder:   C-RADIOv4-SO400M  (ViT-SO400M, patch_size=16, embed_dim=1152)
+# Input:     256×256
+# Tokens:    16×16 = 256 spatial patch tokens, each dim 1152
+# Decoder:   ViT-XL (28 layers, decoder_hidden_size=1152)
+#            decoder image_size = decoder_patch_size * sqrt(base_patches)
+#                               = 16 * sqrt(1024) = 16 * 32 = 512
+#
+# encoder_config_path points to the local C-RADIOv4 snapshot.
+# The preprocessor_config.json inside has do_normalize=false, so
+# AutoImageProcessor returns identity stats (mean=0, std=1).  This means
+# RAE passes raw [0,1] values to the encoder, which then applies its own
+# OpenAI-CLIP normalization via the internal InputConditioner.
+
+stage_1:
+  target: stage1.RAE
+  params:
+    encoder_cls: 'CRadiov4withNorm'
+    # encoder_config_path is used by RAE to load AutoImageProcessor for
+    # mean/std normalisation.  Point it to the local snapshot so that the
+    # CLIPImageProcessor (do_normalize=false) is loaded, yielding identity
+    # normalisation (mean=0, std=1).  RAE will pass [0,1] images directly
+    # to the encoder, which handles its own CLIP normalisation internally.
+    encoder_config_path: '/root/paddlejob/workspace/env_run/penghaotian/models/C-RADIOv4/C-RADIOv4-SO400M'
+    encoder_input_size: 256
+    encoder_params:
+      radio_path: '/root/paddlejob/workspace/env_run/penghaotian/models/C-RADIOv4/C-RADIOv4-SO400M'
+      input_size: 256
+    decoder_config_path: 'configs/decoder/ViTXL'
+    decoder_patch_size: 16
+    noise_tau: 0.8   # 0.8 during training; set to 0 at inference
+    reshape_to_2d: true
+    # normalization_stat_path: ''  # uncomment after computing stats
+
+
+training:
+  epochs: 16
+  ema_decay: 0.9978
+  global_batch_size: 64    # 2-GPU DDP: 32 per GPU; lr scaled by sqrt(64/512)≈0.35  num_workers: 8
+  clip_grad: 0.0
+  log_interval: 100
+  checkpoint_interval: 1   # every 1 epoch
+  sample_every: 2500
+  optimizer:
+    lr: 7.0e-5
+    betas: [0.9, 0.95]
+    weight_decay: 0.0
+  scheduler:
+    type: cosine
+    warmup_epochs: 1
+    decay_end_epoch: 16
+    base_lr: 7.0e-5
+    final_lr: 7.0e-6
+    warmup_from_zero: true
+
+# eval:
+#   eval_interval: 2500
+#   eval_model: true
+#   data_path: 'data/imagenet/val/'
+#   reference_npz_path: 'data/imagenet/val_256.npz'
+#   metrics: ['psnr', 'ssim', 'rfid']
+
+gan:
+  disc:
+    arch:
+      dino_ckpt_path: 'models/discs/dino_vit_small_patch8_224.pth'
+      ks: 9
+      norm_type: 'bn'
+      using_spec_norm: true
+      recipe: 'S_8'
+    optimizer:
+      lr: 7.0e-5
+      betas: [0.9, 0.95]
+      weight_decay: 0.0
+    scheduler:
+      type: cosine
+      warmup_epochs: 1
+      decay_end_epoch: 16
+      base_lr: 7.0e-5
+      final_lr: 7.0e-6
+      warmup_from_zero: true
+    augment:
+      prob: 1.0
+      cutout: 0.0
+  loss:
+    disc_loss: hinge
+    gen_loss: vanilla
+    disc_weight: 0.75
+    perceptual_weight: 1.0
+    disc_start: 8
+    disc_upd_start: 6
+    lpips_start: 0
+    max_d_weight: 10000.0
+    disc_updates: 1

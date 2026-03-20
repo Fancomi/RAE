@@ -31,6 +31,7 @@ def register_encoder(cls: Optional[Type] = None, *, name: Optional[str] = None) 
 
 
 # Import modules that perform registration on import.
-from . import dinov2  
+from . import dinov2
 from . import siglip2
 from . import mae
+from . import cradio

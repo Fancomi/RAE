@@ -1,6 +1,8 @@
 __pycache__
 wandb
 
+*png
+
 .DS_store
 /samples/
 /results/
@@ -18,3 +20,4 @@ upload_to_hf.py
 /ckpts/
 data
 models
+demo_outputs*

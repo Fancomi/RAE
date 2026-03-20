@@ -62,6 +62,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--global-seed", type=int, default=None, help="Override training.global_seed from the config.")    
     parser.add_argument('--wandb', action='store_true', help='Use Weights & Biases for logging if set.')
     parser.add_argument("--compile", action="store_true", help="Use torch compile (for rae.encode, rae.forward).")
+    parser.add_argument("--max-steps", type=int, default=None, help="Stop after this many steps (for quick smoke tests).")
     return parser.parse_args()
 
 
@@ -110,7 +111,7 @@ def save_checkpoint(
     state = {
         "step": step,
         "epoch": epoch,
-        "model": model.module.state_dict(),
+        "model": (model.module if isinstance(model, DDP) else model).state_dict(),
         "ema": ema_model.state_dict(),
         "optimizer": optimizer.state_dict(),
         "scheduler": scheduler.state_dict() if scheduler is not None else None,
@@ -230,12 +231,18 @@ def main():
     # only train decoder
     rae.encoder.requires_grad_(False)
     rae.decoder.requires_grad_(True)
-    ddp_model = DDP(rae, device_ids=[device.index], broadcast_buffers=False, find_unused_parameters=False)  # type: ignore[arg-type]
-    rae = ddp_model.module
-    decoder = ddp_model.module.decoder
+    if world_size > 1:
+        ddp_model = DDP(rae, device_ids=[device.index], broadcast_buffers=False, find_unused_parameters=False)  # type: ignore[arg-type]
+    else:
+        ddp_model = rae  # type: ignore[assignment]
+    rae = ddp_model.module if world_size > 1 else ddp_model
+    decoder = rae.decoder
     discriminator, disc_aug = build_discriminator(disc_cfg, device)
-    ddp_disc = DDP(discriminator, device_ids=[device.index], broadcast_buffers=False, find_unused_parameters=False)  # type: ignore[arg-type]
-    discriminator = ddp_disc.module
+    if world_size > 1:
+        ddp_disc = DDP(discriminator, device_ids=[device.index], broadcast_buffers=False, find_unused_parameters=False)  # type: ignore[arg-type]
+    else:
+        ddp_disc = discriminator  # type: ignore[assignment]
+    discriminator = ddp_disc.module if world_size > 1 else ddp_disc
     disc_scheduler: LambdaLR | None = None
     disc_sched_msg: Optional[str] = None
 
@@ -347,7 +354,8 @@ def main():
     gan_start_step = gan_start_epoch * steps_per_epoch
     disc_update_step = disc_update_epoch * steps_per_epoch
     lpips_start_step = lpips_start_epoch * steps_per_epoch
-    dist.barrier()
+    if dist.is_initialized():
+        dist.barrier()
     for epoch in range(start_epoch, num_epochs):
         ddp_model.train()
         sampler.set_epoch(epoch)
@@ -417,7 +425,7 @@ def main():
             if scheduler is not None:
                 scheduler.step()
 
-            update_ema(ema_model, ddp_model.module, ema_decay)
+            update_ema(ema_model, ddp_model.module if world_size > 1 else ddp_model, ema_decay)
 
             disc_metrics: Dict[str, torch.Tensor] = {}
             if train_disc:
@@ -510,7 +518,7 @@ def main():
                 logger.info("Starting evaluation...")
                 eval_models = [(ema_model, "ema")]
                 if eval_model:
-                    eval_models.append((ddp_model.module, "model"))
+                    eval_models.append((ddp_model.module if world_size > 1 else ddp_model, "model"))
                 for eval_mod, mod_name in eval_models:
                     eval_stats = evaluate_reconstruction_distributed(
                         eval_mod,
@@ -532,6 +540,9 @@ def main():
                         wandb_utils.log(eval_stats, step=global_step)
                 logger.info("Evaluation done.")
             global_step += 1
+            if args.max_steps is not None and global_step >= args.max_steps:
+                logger.info(f"--max-steps {args.max_steps} reached, stopping.")
+                break
         if rank == 0 and num_batches > 0:
             avg_recon = (epoch_metrics["recon"] / num_batches).item()
             avg_lpips = (epoch_metrics["lpips"] / num_batches).item()
@@ -558,6 +569,8 @@ def main():
             )
             if args.wandb:
                 wandb_utils.log(epoch_stats, step=global_step)
+        if args.max_steps is not None and global_step >= args.max_steps:
+            break
     # save the final ckpt
     if rank == 0:
         logger.info(f"Saving final checkpoint at epoch {num_epochs}...")
@@ -574,7 +587,8 @@ def main():
             disc_optimizer,
             disc_scheduler,
         )
-    dist.barrier()
+    if dist.is_initialized():
+        dist.barrier()
     logger.info("Done!")
     cleanup_distributed()
 
