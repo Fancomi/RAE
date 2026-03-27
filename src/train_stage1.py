@@ -419,6 +419,7 @@ def main():
                     gan_loss = torch.zeros_like(recon_total)
             # Calculate adaptive weight outside autocast (autograd operation, not forward pass)
             if use_gan:
+                torch.cuda.empty_cache()
                 adaptive_weight = calculate_adaptive_weight(
                     recon_total, gan_loss, last_layer, max_d_weight
                 )

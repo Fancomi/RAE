@@ -37,22 +37,22 @@ stage_1:
 training:
   epochs: 16
   ema_decay: 0.9978
-  global_batch_size: 128   # 2-GPU DDP: 64 per GPU; lr scaled by sqrt(128/512)=0.5
+  global_batch_size: 96    # 2-GPU DDP: 48 per GPU; reduced from 128 to avoid OOM in adaptive weight grad
   num_workers: 8
-  clip_grad: 1.0           # 防止 GAN 启动时梯度尖峰
+  clip_grad: 0.0
   log_interval: 100
   checkpoint_interval: 4   # every 1 epoch
   sample_every: 2500
   optimizer:
-    lr: 1.0e-4
+    lr: 8.66e-5   # sqrt(96/128) * 1e-4
     betas: [0.9, 0.95]
     weight_decay: 0.0
   scheduler:
     type: cosine
     warmup_epochs: 1
     decay_end_epoch: 16
-    base_lr: 1.0e-4
-    final_lr: 1.0e-5
+    base_lr: 8.66e-5  # sqrt(96/128) * 1e-4
+    final_lr: 8.66e-6 # sqrt(96/128) * 1e-5
     warmup_from_zero: true
 
 eval:
@@ -71,15 +71,15 @@ gan:
       using_spec_norm: true
       recipe: 'S_8'
     optimizer:
-      lr: 1.0e-4
+      lr: 8.66e-5   # sqrt(96/128) * 1e-4
       betas: [0.9, 0.95]
       weight_decay: 0.0
     scheduler:
       type: cosine
       warmup_epochs: 1
       decay_end_epoch: 16
-      base_lr: 1.0e-4
-      final_lr: 1.0e-5
+      base_lr: 8.66e-5  # sqrt(96/128) * 1e-4
+      final_lr: 8.66e-6 # sqrt(96/128) * 1e-5
       warmup_from_zero: true
     augment:
       prob: 1.0

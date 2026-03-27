@@ -4,7 +4,7 @@ from PIL import Image
 import numpy as np
 from collections import OrderedDict
 import torch
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Subset
 from torch.utils.data.distributed import DistributedSampler
 from torchvision import transforms
 from torchvision.datasets import ImageFolder
@@ -83,10 +83,22 @@ def prepare_dataloader(
     rank: int,
     world_size: int,
     transform: List= None,
+    subset_ratio: float = 1.0,
+    seed: int = 0,
 ) -> Tuple[DataLoader, DistributedSampler]:
     train_dir = Path(data_path) / "train"
     dataset = ImageFolder(str(train_dir if train_dir.is_dir() else data_path), transform=transform)
-    sampler = DistributedSampler(dataset, num_replicas=world_size, rank=rank, shuffle=True)
+    if subset_ratio < 1.0:
+        n = max(1, int(len(dataset) * subset_ratio))
+        indices = list(range(0, len(dataset), max(1, len(dataset) // n)))[:n]
+        dataset = Subset(dataset, indices)
+    sampler = DistributedSampler(dataset, num_replicas=world_size, rank=rank, shuffle=True, seed=seed)
+
+    def worker_init_fn(worker_id):
+        worker_seed = seed + worker_id
+        np.random.seed(worker_seed)
+        torch.manual_seed(worker_seed)
+
     loader = DataLoader(
         dataset,
         batch_size=batch_size,
@@ -94,6 +106,8 @@ def prepare_dataloader(
         num_workers=workers,
         pin_memory=True,
         drop_last=True,
+        worker_init_fn=worker_init_fn,
+        generator=torch.Generator().manual_seed(seed),
     )
     return loader, sampler
 

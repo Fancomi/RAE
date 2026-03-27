@@ -5,10 +5,12 @@
 A minimal training script for SiT using PyTorch DDP.
 """
 import argparse
+import csv
 import logging
 import math
 import os
 from collections import defaultdict, OrderedDict
+from datetime import datetime
 import torch
 # the first flag below was False when we tested this script but True makes A100 training a lot faster:
 torch.backends.cuda.matmul.allow_tf32 = True
@@ -156,7 +158,8 @@ def main():
         global_batch_size = batch_size * world_size * grad_accum_steps
     num_workers = int(training_cfg.get("num_workers", 4))
     log_interval = int(training_cfg.get("log_interval", 100))
-    sample_every = int(training_cfg.get("sample_every", 2500)) 
+    sample_every = int(training_cfg.get("sample_every", 2500))
+    train_subset_ratio = float(training_cfg.get("train_subset_ratio", 1.0))
     checkpoint_interval = int(training_cfg.get("checkpoint_interval", 4)) # ckpt interval is epoch based
     cfg_scale_override = training_cfg.get("cfg_scale", None)
     default_seed = int(training_cfg.get("global_seed", 0))
@@ -170,6 +173,7 @@ def main():
         eval_model = eval_config.get("eval_model", False) # by default eval ema. This decides whether to **additionally** eval the non-ema model.
         eval_data = eval_config.get("data_path", None)
         reference_npz_path = eval_config.get("reference_npz_path", None)
+        num_eval_samples = eval_config.get("num_eval_samples", None)  # None → use full val set
         assert eval_data, "eval.data_path must be specified to enable evaluation."
         assert reference_npz_path, "eval.reference_npz_path must be specified to enable evaluation."
     else:
@@ -212,6 +216,13 @@ def main():
     t_max = float(guidance_value("t_max", 1.0))
     
     experiment_dir, checkpoint_dir, logger = configure_experiment_dirs(args, rank)
+
+    # CSV metrics logger (rank-0 only), append mode, consistent with stage1
+    csv_path = os.path.join(experiment_dir, "metrics.csv")
+    csv_file = open(csv_path, "a", newline="") if rank == 0 else None
+    csv_writer = csv.writer(csv_file) if csv_file else None
+    if csv_file and os.path.getsize(csv_path) == 0:
+        csv_writer.writerow(["step", "epoch", "timestamp", "split", "key", "value"])
     
     #### Model init
     rae: RAE = instantiate_from_config(rae_config).to(device)
@@ -254,7 +265,8 @@ def main():
         transforms.ToTensor(),
     ])
     loader, sampler = prepare_dataloader(
-        args.data_path, micro_batch_size, num_workers, rank, world_size, transform=stage2_transform
+        args.data_path, micro_batch_size, num_workers, rank, world_size,
+        transform=stage2_transform, subset_ratio=train_subset_ratio, seed=global_seed
     )
     if do_eval:
         eval_dataset = ImageFolder(
@@ -264,7 +276,9 @@ def main():
                 transforms.ToTensor(),
             ])
         )
-        logger.info(f"Evaluation dataset loaded from {eval_data}, containing {len(eval_dataset)} images.")
+        _n_eval = int(num_eval_samples) if num_eval_samples is not None else len(eval_dataset)
+        _n_eval = min(_n_eval, len(eval_dataset))
+        logger.info(f"Evaluation dataset loaded from {eval_data}, containing {len(eval_dataset)} images; using {_n_eval} for FID.")
         
     loader_batches = len(loader)
     if loader_batches % grad_accum_steps != 0:
@@ -380,7 +394,7 @@ def main():
         step_loss_accum = 0.0
         if checkpoint_interval > 0 and epoch % checkpoint_interval == 0  and rank == 0:
             logger.info(f"Saving checkpoint at epoch {epoch}...")
-            ckpt_path = f"{checkpoint_dir}/ep-{epoch:07d}.pt" 
+            ckpt_path = f"{checkpoint_dir}/ep-{epoch:07d}.pt"
             save_checkpoint(
                 ckpt_path,
                 global_step,
@@ -390,6 +404,11 @@ def main():
                 optimizer,
                 scheduler,
             )
+            # 删除旧 checkpoint，只保留最新一个（ep-last.pt 由训练结束单独保存）
+            for old in os.listdir(checkpoint_dir):
+                old_path = os.path.join(checkpoint_dir, old)
+                if old.endswith(".pt") and old != os.path.basename(ckpt_path) and old != "ep-last.pt":
+                    os.remove(old_path)
         for step, (images, labels) in enumerate(loader):
             images = images.to(device)
             labels = labels.to(device)
@@ -431,6 +450,11 @@ def main():
                     f"[Epoch {epoch} | Step {global_step}] "
                     + ", ".join(f"{k}: {v:.4f}" for k, v in stats.items())
                 )
+                if csv_writer:
+                    ts = datetime.now().strftime("%H:%M:%S")
+                    for k, v in stats.items():
+                        csv_writer.writerow([global_step, epoch, ts, "train", k, f"{v:.6f}"])
+                    csv_file.flush()
                 if args.wandb:
                     wandb_utils.log(
                         stats,
@@ -469,9 +493,9 @@ def main():
                         latent_size,
                         sample_model_kwargs,
                         use_guidance,
-                        rae, 
+                        rae,
                         eval_dataset,
-                        len(eval_dataset),
+                        _n_eval,
                         rank = rank,
                         world_size = world_size,
                         device = device,
@@ -483,6 +507,11 @@ def main():
                     )
                     # log with prefix
                     eval_stats = {f"eval_{mod_name}/{k}": v for k, v in eval_stats.items()} if eval_stats is not None else {}
+                    if csv_writer and eval_stats:
+                        ts = datetime.now().strftime("%H:%M:%S")
+                        for k, v in eval_stats.items():
+                            csv_writer.writerow([global_step, epoch, ts, "eval", k, f"{v:.6f}"])
+                        csv_file.flush()
                     if args.wandb:
                         wandb_utils.log(eval_stats, step=global_step)
                     model.train()
@@ -490,7 +519,7 @@ def main():
             global_step += 1
             num_batches += 1
         if rank == 0 and num_batches > 0:
-            avg_loss = epoch_metrics['loss'].item() / num_batches 
+            avg_loss = epoch_metrics['loss'].item() / num_batches
             epoch_stats = {
                 "epoch/loss": avg_loss,
             }
@@ -498,6 +527,11 @@ def main():
                 f"[Epoch {epoch}] "
                 + ", ".join(f"{k}: {v:.4f}" for k, v in epoch_stats.items())
             )
+            if csv_writer:
+                ts = datetime.now().strftime("%H:%M:%S")
+                for k, v in epoch_stats.items():
+                    csv_writer.writerow([global_step, epoch, ts, "train", k, f"{v:.6f}"])
+                csv_file.flush()
             if args.wandb:
                 wandb_utils.log(epoch_stats, step=global_step)
     # save the final ckpt

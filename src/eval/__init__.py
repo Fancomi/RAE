@@ -100,6 +100,9 @@ def evaluate_generation_distributed(
     if rank == 0:
         print(f"\n[Eval] Starting distributed sampling evaluation at step {global_step}")
         os.makedirs(temp_dir, exist_ok=True)
+        for f in os.listdir(temp_dir):
+            if f.endswith(".npz"):
+                os.remove(os.path.join(temp_dir, f))
 
     # Wait for rank 0 to create the directory before other ranks try to save
     dist.barrier()
@@ -245,6 +248,9 @@ def evaluate_reconstruction_distributed(
     if rank == 0:
         print(f"\n[Eval] Starting distributed reconstruction evaluation at step {global_step}")
         os.makedirs(temp_dir, exist_ok=True)
+        for f in os.listdir(temp_dir):
+            if f.endswith(".npz"):
+                os.remove(os.path.join(temp_dir, f))
 
     # Wait for rank 0 to create the directory before other ranks try to save
     dist.barrier()

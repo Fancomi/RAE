@@ -1,0 +1,93 @@
+stage_1:
+  target: stage1.RAE
+  params:
+    encoder_cls: 'CRadiov4withNorm'
+    encoder_config_path: '/root/paddlejob/workspace/env_run/penghaotian/models/C-RADIOv4/C-RADIOv4-SO400M'
+    encoder_input_size: 256
+    encoder_params:
+      radio_path: '/root/paddlejob/workspace/env_run/penghaotian/models/C-RADIOv4/C-RADIOv4-SO400M'
+      input_size: 256
+    decoder_config_path: 'configs/decoder/ViTXL'
+    decoder_patch_size: 16
+    pretrained_decoder_path: 'models/decoders/cradio/SO400M/ViTXL/model.pt'
+    noise_tau: 0.0
+    reshape_to_2d: true
+    normalization_stat_path: 'models/stats/cradio/SO400M/imagenet1k/normalization_stats.pt'
+
+stage_2:
+  target: stage2.models.DDT.DiTwDDTHead
+  params:
+    input_size: 16
+    patch_size: 1
+    in_channels: 1152
+    hidden_size: [384, 2048]   # 与DINOv2-S对应的DiT-S主干，仅in_channels不同
+    depth: [12, 2]
+    num_heads: [6, 16]
+    mlp_ratio: 4.0
+    class_dropout_prob: 0.1
+    num_classes: 1000
+    use_qknorm: false
+    use_swiglu: true
+    use_rope: true
+    use_rmsnorm: true
+    wo_shift: false
+    use_pos_embed: true
+
+transport:
+  params:
+    path_type: 'Linear'
+    prediction: 'velocity'
+    loss_weight: null
+    time_dist_type: 'logit-normal_0_1'
+
+sampler:
+  mode: ODE
+  params:
+    sampling_method: 'euler'
+    num_steps: 50
+    atol: 1.0e-6
+    rtol: 1.0e-3
+    reverse: false
+
+guidance:
+  method: 'cfg'
+  scale: 1.0
+  t_min: 0.0
+  t_max: 1.0
+
+misc:
+  latent_size: [1152, 16, 16]  # SO400M embed_dim=1152
+  num_classes: 1000
+  time_dist_shift_dim: 294912  # 16*16*1152
+  time_dist_shift_base: 4096
+
+eval:
+  eval_interval: 250          # 1/10数据每epoch≈125steps，约每2epoch eval一次，共10个点
+  eval_model: false             # 只eval ema
+  num_eval_samples: 5000        # 1/10 val，与DINOv2实验对齐
+  data_path: '/root/paddlejob/workspace/env_run/penghaotian/datas/imagenet-1k/validation'
+  reference_npz_path: '/root/paddlejob/workspace/env_run/penghaotian/datas/imagenet-1k/val_256_ref_stats.npz'
+
+training:
+  epochs: 60                    # 1/10数据×20ep ≈ 2500 steps
+  global_batch_size: 1024
+  grad_accum_steps: 1           # S模型显存友好
+  train_subset_ratio: 0.1       # 只用1/10训练数据
+  ema_decay: 0.9995
+  num_workers: 8
+  log_interval: 100
+  checkpoint_interval: 5
+  sample_every: 2500
+  clip_grad: 1.0
+  global_seed: 42
+  optimizer:
+    lr: 2.0e-4
+    betas: [0.9, 0.95]
+    weight_decay: 0.0
+  scheduler:
+    type: linear
+    warmup_epochs: 2
+    decay_end_epoch: 15
+    base_lr: 2.0e-4
+    final_lr: 2.0e-5
+    warmup_from_zero: false
